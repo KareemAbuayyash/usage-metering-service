@@ -1,9 +1,16 @@
 import Fastify from "fastify";
 import { pool } from "./db.js";
+import { accountRoutes } from "./routes/accounts.js";
+import { usageRoutes } from "./routes/usage.js";
+import { userRoutes } from "./routes/users.js";
 
 const app = Fastify({
   logger: true,
 });
+
+app.register(accountRoutes);
+app.register(userRoutes);
+app.register(usageRoutes);
 
 app.get("/health", async () => {
   return {

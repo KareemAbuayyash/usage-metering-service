@@ -452,6 +452,8 @@ describe("API endpoints", () => {
 
     expect(response.statusCode).toBe(422);
     expect(response.json().allowed).toBe(false);
+    expect(response.json().reason).toBe("MAX_UNITS_PER_REQUEST");
+    expect(response.json().scope).toBe("user");
 
     const currentResponse = await app.inject({
       method: "GET",

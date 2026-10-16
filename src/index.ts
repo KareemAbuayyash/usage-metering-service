@@ -3,6 +3,7 @@ import { pool } from "./db.js";
 import { accountRoutes } from "./routes/accounts.js";
 import { planRoutes } from "./routes/plans.js";
 import { usageRoutes } from "./routes/usage.js";
+import { usageReportRoutes } from "./routes/usage-reports.js";
 import { userRoutes } from "./routes/users.js";
 
 const app = Fastify({
@@ -13,6 +14,7 @@ app.register(accountRoutes);
 app.register(planRoutes);
 app.register(userRoutes);
 app.register(usageRoutes);
+app.register(usageReportRoutes);
 
 app.get("/health", async () => {
   return {

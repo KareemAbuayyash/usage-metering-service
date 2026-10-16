@@ -4,7 +4,7 @@ services:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: usage_metering
+      POSTGRES_DB: usage_metering_v2
       POSTGRES_USER: usage_app
       POSTGRES_PASSWORD: local_dev_password
     ports:

@@ -706,4 +706,223 @@ describe("API endpoints", () => {
     expect(historyResponse.json().data).toEqual([]);
   });
 
+  it("POST /usage/consume enforces the account quota under concurrent requests", async () => {
+    const accountResponse = await app.inject({
+      method: "POST",
+      url: "/accounts",
+      payload: {
+        name: `Vitest Concurrency ${Date.now()}`,
+        plan: "Starter",
+      },
+    });
+
+    expect(accountResponse.statusCode).toBe(201);
+
+    const account = accountResponse.json();
+    createdAccountIds.push(account.id);
+
+    const planResponse = await app.inject({
+      method: "POST",
+      url: "/plans",
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+      payload: {
+        scope: "account",
+        name: `Concurrency Limit ${Date.now()}`,
+        monthlyLimit: 10,
+        maxUnitsPerRequest: 10,
+      },
+    });
+
+    expect(planResponse.statusCode).toBe(201);
+
+    const plan = planResponse.json().plan;
+
+    const assignResponse = await app.inject({
+      method: "PUT",
+      url: "/plans/assign/account",
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+      payload: {
+        planId: plan.id,
+      },
+    });
+
+    expect(assignResponse.statusCode).toBe(200);
+
+    const userResponse = await app.inject({
+      method: "POST",
+      url: "/users",
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+      payload: {
+        name: "Concurrency Test User",
+        plan: "Basic",
+      },
+    });
+
+    expect(userResponse.statusCode).toBe(201);
+
+    const user = userResponse.json();
+    createdUserIds.push(user.id);
+
+    const responses = await Promise.all(
+      Array.from({ length: 10 }, (_, index) =>
+        app.inject({
+          method: "POST",
+          url: "/usage/consume",
+          headers: {
+            "x-api-key": account.apiKey,
+          },
+          payload: {
+            userId: user.id,
+            requestId: `concurrency-${Date.now()}-${index}`,
+            units: 2,
+          },
+        }),
+      ),
+    );
+
+    const accepted = responses.filter(
+      (response) => response.statusCode === 200,
+    );
+
+    const rejected = responses.filter(
+      (response) => response.statusCode === 429,
+    );
+
+    expect(accepted).toHaveLength(5);
+    expect(rejected).toHaveLength(5);
+
+    for (const response of rejected) {
+      expect(response.json().allowed).toBe(false);
+      expect(response.json().reason).toBe("MONTHLY_LIMIT_EXCEEDED");
+      expect(response.json().scope).toBe("account");
+    }
+
+    const usageResponse = await app.inject({
+      method: "GET",
+      url: `/usage/current?userId=${user.id}`,
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+    });
+
+    expect(usageResponse.statusCode).toBe(200);
+    expect(usageResponse.json().account.consumed).toBe("10");
+    expect(usageResponse.json().user.consumed).toBe("10");
+  });
+
+  it("POST /usage/consume applies updated account plan limits to future requests", async () => {
+    const accountResponse = await app.inject({
+      method: "POST",
+      url: "/accounts",
+      payload: {
+        name: `Vitest Plan Update ${Date.now()}`,
+        plan: "Starter",
+      },
+    });
+
+    expect(accountResponse.statusCode).toBe(201);
+
+    const account = accountResponse.json();
+    createdAccountIds.push(account.id);
+
+    const userResponse = await app.inject({
+      method: "POST",
+      url: "/users",
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+      payload: {
+        name: "Plan Update Test User",
+        plan: "Basic",
+      },
+    });
+
+    expect(userResponse.statusCode).toBe(201);
+
+    const user = userResponse.json();
+    createdUserIds.push(user.id);
+
+    const firstUsage = await app.inject({
+      method: "POST",
+      url: "/usage/consume",
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+      payload: {
+        userId: user.id,
+        requestId: `plan-update-before-${Date.now()}`,
+        units: 5,
+      },
+    });
+
+    expect(firstUsage.statusCode).toBe(200);
+
+    const planResponse = await app.inject({
+      method: "POST",
+      url: "/plans",
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+      payload: {
+        scope: "account",
+        name: `Updated Account Limit ${Date.now()}`,
+        monthlyLimit: 3,
+        maxUnitsPerRequest: 10,
+      },
+    });
+
+    expect(planResponse.statusCode).toBe(201);
+
+    const plan = planResponse.json().plan;
+
+    const assignResponse = await app.inject({
+      method: "PUT",
+      url: "/plans/assign/account",
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+      payload: {
+        planId: plan.id,
+      },
+    });
+
+    expect(assignResponse.statusCode).toBe(200);
+
+    const nextUsage = await app.inject({
+      method: "POST",
+      url: "/usage/consume",
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+      payload: {
+        userId: user.id,
+        requestId: `plan-update-after-${Date.now()}`,
+        units: 1,
+      },
+    });
+
+    expect(nextUsage.statusCode).toBe(429);
+    expect(nextUsage.json().allowed).toBe(false);
+    expect(nextUsage.json().reason).toBe("MONTHLY_LIMIT_EXCEEDED");
+    expect(nextUsage.json().scope).toBe("account");
+
+    const usageResponse = await app.inject({
+      method: "GET",
+      url: `/usage/current?userId=${user.id}`,
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+    });
+
+    expect(usageResponse.statusCode).toBe(200);
+    expect(usageResponse.json().account.consumed).toBe("5");
+    expect(usageResponse.json().user.consumed).toBe("5");
+  });
+
 });

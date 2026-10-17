@@ -79,6 +79,22 @@ const historySchema = z.object({
   }),
 });
 
+const monthlyUsageSchema = z.object({
+  monthStart: z.string(),
+  account: z.object({
+    consumed: numericValue,
+    acceptedRequests: z.number(),
+    rejectedRequests: z.number(),
+  }),
+  user: z.object({
+    id: z.string(),
+    name: z.string(),
+    consumed: numericValue,
+    acceptedRequests: z.number(),
+    rejectedRequests: z.number(),
+  }).optional(),
+});
+
 const consumeResultSchema = z.object({
   allowed: z.boolean(),
   requestId: z.string(),
@@ -99,6 +115,7 @@ export type User = z.infer<typeof userSchema>;
 export type Plan = z.infer<typeof planSchema>;
 export type CurrentUsage = z.infer<typeof currentUsageSchema>;
 export type History = z.infer<typeof historySchema>;
+export type MonthlyUsage = z.infer<typeof monthlyUsageSchema>;
 export type ConsumeResult = z.infer<typeof consumeResultSchema>;
 
 export class ApiError extends Error {
@@ -295,6 +312,7 @@ export class ApiClient {
     limit: number;
     status?: "accepted" | "rejected";
     userId?: string;
+    month?: string;
   }) {
     const query = new URLSearchParams({
       page: String(input.page),
@@ -302,7 +320,14 @@ export class ApiClient {
     });
     if (input.status) query.set("status", input.status);
     if (input.userId) query.set("userId", input.userId);
+    if (input.month) query.set("month", input.month);
     return this.request(`/usage/history?${query}`, historySchema);
+  }
+
+  getMonthlyUsage(month: string, userId?: string) {
+    const query = new URLSearchParams({ month });
+    if (userId) query.set("userId", userId);
+    return this.request(`/usage/monthly?${query}`, monthlyUsageSchema);
   }
 
   consume(userId: string, requestId: string, units: number) {

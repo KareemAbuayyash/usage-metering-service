@@ -1161,4 +1161,144 @@ describe("API endpoints", () => {
     expect(usageResponse.json().user.consumed).toBe("5");
   });
 
+  it("GET /usage/monthly reports historical usage and filters history by UTC month", async () => {
+    const accountAResponse = await app.inject({
+      method: "POST",
+      url: "/accounts",
+      payload: {
+        name: `Vitest Monthly Report A ${Date.now()}`,
+        plan: "Starter",
+      },
+    });
+
+    expect(accountAResponse.statusCode).toBe(201);
+    const accountA = accountAResponse.json();
+    createdAccountIds.push(accountA.id);
+
+    const userAResponse = await app.inject({
+      method: "POST",
+      url: "/users",
+      headers: { "x-api-key": accountA.apiKey },
+      payload: { name: "Monthly Report User A", plan: "Basic" },
+    });
+
+    expect(userAResponse.statusCode).toBe(201);
+    const userA = userAResponse.json();
+    createdUserIds.push(userA.id);
+
+    const accountBResponse = await app.inject({
+      method: "POST",
+      url: "/accounts",
+      payload: {
+        name: `Vitest Monthly Report B ${Date.now()}`,
+        plan: "Starter",
+      },
+    });
+
+    expect(accountBResponse.statusCode).toBe(201);
+    const accountB = accountBResponse.json();
+    createdAccountIds.push(accountB.id);
+
+    const userBResponse = await app.inject({
+      method: "POST",
+      url: "/users",
+      headers: { "x-api-key": accountB.apiKey },
+      payload: { name: "Monthly Report User B", plan: "Basic" },
+    });
+
+    expect(userBResponse.statusCode).toBe(201);
+    const userB = userBResponse.json();
+    createdUserIds.push(userB.id);
+
+    const previousMonthDate = new Date();
+    previousMonthDate.setUTCDate(1);
+    previousMonthDate.setUTCMonth(previousMonthDate.getUTCMonth() - 1);
+    const month = `${previousMonthDate.getUTCFullYear()}-${String(
+      previousMonthDate.getUTCMonth() + 1,
+    ).padStart(2, "0")}`;
+    const monthStart = `${month}-01`;
+
+    await pool.query(
+      `INSERT INTO usage_periods (account_id, user_id, month_start, consumed_units)
+       VALUES ($1, NULL, $3, 5), ($1, $2, $3, 5),
+              ($4, NULL, $3, 9), ($4, $5, $3, 9)`,
+      [accountA.id, userA.id, monthStart, accountB.id, userB.id],
+    );
+
+    await pool.query(
+      `INSERT INTO usage_requests (
+         account_id, user_id, request_id, request_hash, units, status,
+         rejection_scope, rejection_reason, created_at
+       )
+       VALUES
+         ($1, $2, $3, $4, 5, 'accepted', NULL, NULL, $6::date::timestamp AT TIME ZONE 'UTC' + INTERVAL '2 days'),
+         ($1, $2, $5, $4, 1, 'rejected', 'account', 'MONTHLY_LIMIT_EXCEEDED', $6::date::timestamp AT TIME ZONE 'UTC' + INTERVAL '3 days'),
+         ($7, $8, $9, $4, 9, 'accepted', NULL, NULL, $6::date::timestamp AT TIME ZONE 'UTC' + INTERVAL '2 days')`,
+      [
+        accountA.id,
+        userA.id,
+        `monthly-report-accepted-${Date.now()}`,
+        "a".repeat(64),
+        `monthly-report-rejected-${Date.now()}`,
+        monthStart,
+        accountB.id,
+        userB.id,
+        `monthly-report-other-account-${Date.now()}`,
+      ],
+    );
+
+    const missingKeyResponse = await app.inject({
+      method: "GET",
+      url: `/usage/monthly?month=${month}`,
+    });
+    expect(missingKeyResponse.statusCode).toBe(401);
+
+    const invalidMonthResponse = await app.inject({
+      method: "GET",
+      url: "/usage/monthly?month=2026-13",
+      headers: { "x-api-key": accountA.apiKey },
+    });
+    expect(invalidMonthResponse.statusCode).toBe(400);
+
+    const monthlyResponse = await app.inject({
+      method: "GET",
+      url: `/usage/monthly?month=${month}&userId=${userA.id}`,
+      headers: { "x-api-key": accountA.apiKey },
+    });
+
+    expect(monthlyResponse.statusCode).toBe(200);
+    expect(monthlyResponse.json()).toEqual({
+      monthStart,
+      account: {
+        consumed: "5",
+        acceptedRequests: 1,
+        rejectedRequests: 1,
+      },
+      user: {
+        id: userA.id,
+        name: userA.name,
+        consumed: "5",
+        acceptedRequests: 1,
+        rejectedRequests: 1,
+      },
+    });
+
+    const historyResponse = await app.inject({
+      method: "GET",
+      url: `/usage/history?month=${month}&userId=${userA.id}`,
+      headers: { "x-api-key": accountA.apiKey },
+    });
+    expect(historyResponse.statusCode).toBe(200);
+    expect(historyResponse.json().pagination.total).toBe(2);
+    expect(historyResponse.json().data).toHaveLength(2);
+
+    const crossAccountUserResponse = await app.inject({
+      method: "GET",
+      url: `/usage/monthly?month=${month}&userId=${userB.id}`,
+      headers: { "x-api-key": accountA.apiKey },
+    });
+    expect(crossAccountUserResponse.statusCode).toBe(404);
+    expect(crossAccountUserResponse.json().error).toBe("USER_NOT_FOUND");
+  });
+
 });

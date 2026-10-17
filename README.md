@@ -155,6 +155,7 @@ The API listens on port `3000` by default.
 | PUT | `/plans/assign/user` | Assign a plan to a user |
 | POST | `/usage/consume` | Record a usage request and enforce quotas |
 | GET | `/usage/current` | Retrieve current-month usage |
+| GET | `/usage/monthly` | Retrieve historical monthly usage and request outcomes |
 | GET | `/usage/history` | Retrieve paginated usage history |
 
 Authenticated endpoints use the `x-api-key` HTTP header:
@@ -232,6 +233,45 @@ The `requestId` supports idempotency: repeating the same request ID with the sam
 
 Requests that exceed the maximum units per request or the monthly quota are rejected with the appropriate error response.
 
+An accepted response (`200 OK`) includes `allowed: true`, the request ID and units, and the updated account and user usage counters. A quota rejection (`429 Too Many Requests`) includes `allowed: false`, plus `reason` and `scope`:
+
+```json
+{
+  "allowed": true,
+  "requestId": "unique-request-001",
+  "units": 5,
+  "accountUsage": {
+    "consumed": 5,
+    "limit": 10000
+  },
+  "userUsage": {
+    "consumed": 5,
+    "limit": 1000
+  }
+}
+```
+
+```json
+{
+  "allowed": false,
+  "requestId": "unique-request-001",
+  "units": 5,
+  "scope": "account",
+  "reason": "MONTHLY_LIMIT_EXCEEDED"
+}
+```
+
+A reused request ID with a different user or unit count returns `409 Conflict`:
+
+```json
+{
+  "error": "IDEMPOTENCY_CONFLICT",
+  "message": "This request ID was already used with different data."
+}
+```
+
+Invalid request bodies or query parameters return `400 Bad Request` with `error: "VALIDATION_ERROR"` and a `details` array. Missing or invalid API keys return `401 Unauthorized` with `error: "UNAUTHORIZED"`.
+
 ### Get Current Usage
 
 **Request**
@@ -243,16 +283,84 @@ x-api-key: YOUR_API_KEY
 
 The report includes consumed units, configured limits, remaining quota, and maximum units per request for the account and user.
 
+### Get Historical Monthly Usage
+
+**Request**
+
+```http
+GET /usage/monthly?month=2026-09&userId=USER_UUID
+x-api-key: YOUR_API_KEY
+```
+
+`month` is required in `YYYY-MM` format; `userId` is optional and must belong to the authenticated account. The account totals are always returned, and the user's totals are included when a user ID is supplied:
+
+```json
+{
+  "monthStart": "2026-09-01",
+  "account": {
+    "consumed": "5",
+    "acceptedRequests": 1,
+    "rejectedRequests": 1
+  },
+  "user": {
+    "id": "USER_UUID",
+    "name": "Example User",
+    "consumed": "5",
+    "acceptedRequests": 1,
+    "rejectedRequests": 1
+  }
+}
+```
+
+Historical request counts include accepted and rejected records for that UTC calendar month. Historical plan assignments are not stored, so the service cannot reliably calculate a past month's quota limit or remaining units after plans change; use `/usage/current` for current limits and remaining quota.
+
 ### Get Usage History
 
 **Request**
 
 ```http
-GET /usage/history?page=1&limit=5&status=accepted&userId=USER_UUID
+GET /usage/history?page=1&limit=5&status=accepted&userId=USER_UUID&month=2026-09
 x-api-key: YOUR_API_KEY
 ```
 
-Pagination parameters include `page` and `limit`. Optional filters include `status` and `userId`.
+Pagination parameters include `page` and `limit`. Optional filters include `status`, `userId`, and UTC calendar `month` (`YYYY-MM`). The response contains a `data` array of request records and `pagination` metadata:
+
+```json
+{
+  "data": [
+    {
+      "request_id": "unique-request-001",
+      "user_id": "USER_UUID",
+      "user_name": "Example User",
+      "units": "5",
+      "status": "accepted",
+      "rejection_scope": null,
+      "rejection_reason": null,
+      "created_at": "2026-09-12T12:00:00.000Z"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 5,
+    "total": 1,
+    "totalPages": 1,
+    "hasNextPage": false,
+    "hasPreviousPage": false
+  }
+}
+```
+
+The dashboard's History section supports month, status, and user filters and shows the selected month's account and (when selected) user consumption and request outcome totals.
+
+## Assumptions and Limitations
+
+- Quota periods are UTC calendar months, and usage is measured in integer units supplied by the caller.
+- The API key identifies and scopes an account; there are no separate end-user credentials or role-based permissions.
+- Request IDs are unique within an account. Identical retries replay the original outcome, while a changed payload using the same ID is a conflict.
+- Account and user monthly limits are enforced independently. Changing a plan affects future consumption checks and does not reset or remove already-recorded usage.
+- Built-in plans are shared defaults; custom plans belong to the creating account and can only be assigned within that account.
+- Historical request and consumption records are retained, but plan assignments are not versioned. Therefore past quota limits and remaining balances cannot be reconstructed after plan changes.
+- This project demonstrates metering and quota enforcement; it does not provide billing, refunds, chargebacks, end-user authentication, or distributed multi-region quota coordination.
 
 ## Built-in Plans
 
@@ -403,6 +511,8 @@ Environment: local API and PostgreSQL running through Docker Compose.
 | Maximum latency | 123.97 ms |
 
 These measurements come from one local run and are not a production capacity guarantee. Results vary with hardware, database state, environment, and workload. Repeat the test under controlled conditions before making performance claims.
+
+This run demonstrates that the sample workload completed without request failures and provides a baseline of roughly 148 requests per second with a p95 latency below 90 ms on that local setup. It does not measure saturation or establish production capacity. Usage requests for one account are serialized by the account-row lock, so contention on a heavily used account is a reasonable area for a larger, controlled follow-up benchmark; this single-account sample does not quantify that limit.
 
 ## License
 

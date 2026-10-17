@@ -7,8 +7,19 @@ const currentQuerySchema = z.object({
   userId: z.string().uuid().optional(),
 });
 
+const monthSchema = z.string().regex(
+  /^\d{4}-(0[1-9]|1[0-2])$/,
+  "Month must use YYYY-MM format.",
+);
+
+const monthlyQuerySchema = z.object({
+  month: monthSchema,
+  userId: z.string().uuid().optional(),
+});
+
 const historyQuerySchema = z.object({
   userId: z.string().uuid().optional(),
+  month: monthSchema.optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   status: z.enum(["accepted", "rejected"]).optional(),
@@ -169,6 +180,97 @@ export async function usageReportRoutes(app: FastifyInstance) {
     };
   });
 
+  // Historical usage totals and request outcomes for a UTC calendar month.
+  app.get("/usage/monthly", async (request, reply) => {
+    const accountId = await authenticate(request.headers["x-api-key"]);
+
+    if (!accountId) {
+      return reply.code(401).send({
+        error: "UNAUTHORIZED",
+        message: "Missing or invalid API key.",
+      });
+    }
+
+    const parsed = monthlyQuerySchema.safeParse(request.query);
+
+    if (!parsed.success) {
+      return reply.code(400).send(validationError(parsed.error.issues));
+    }
+
+    const { month, userId } = parsed.data;
+    const monthStart = `${month}-01`;
+
+    const accountResult = await pool.query(
+      `SELECT
+         COALESCE((
+           SELECT consumed_units
+           FROM usage_periods
+           WHERE account_id = $1 AND user_id IS NULL AND month_start = $2
+         ), 0)::text AS consumed,
+         COUNT(*) FILTER (WHERE status = 'accepted')::text AS accepted_requests,
+         COUNT(*) FILTER (WHERE status = 'rejected')::text AS rejected_requests
+       FROM usage_requests
+       WHERE account_id = $1
+         AND created_at >= ($2::date::timestamp AT TIME ZONE 'UTC')
+         AND created_at < (($2::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'UTC')`,
+      [accountId, monthStart],
+    );
+
+    const account = accountResult.rows[0];
+    const report = {
+      monthStart,
+      account: {
+        consumed: account.consumed,
+        acceptedRequests: Number(account.accepted_requests),
+        rejectedRequests: Number(account.rejected_requests),
+      },
+    };
+
+    if (!userId) {
+      return report;
+    }
+
+    const userResult = await pool.query(
+      `SELECT u.id, u.name,
+         COALESCE((
+           SELECT consumed_units
+           FROM usage_periods
+           WHERE account_id = $2 AND user_id = u.id AND month_start = $3
+         ), 0)::text AS consumed,
+         COUNT(r.id) FILTER (WHERE r.status = 'accepted')::text AS accepted_requests,
+         COUNT(r.id) FILTER (WHERE r.status = 'rejected')::text AS rejected_requests
+       FROM users u
+       LEFT JOIN usage_requests r
+         ON r.account_id = u.account_id
+        AND r.user_id = u.id
+         AND r.created_at >= ($3::date::timestamp AT TIME ZONE 'UTC')
+         AND r.created_at < (($3::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'UTC')
+       WHERE u.id = $1 AND u.account_id = $2
+       GROUP BY u.id, u.name`,
+      [userId, accountId, monthStart],
+    );
+
+    if (userResult.rowCount !== 1) {
+      return reply.code(404).send({
+        error: "USER_NOT_FOUND",
+        message: "User not found in this account.",
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    return {
+      ...report,
+      user: {
+        id: user.id,
+        name: user.name,
+        consumed: user.consumed,
+        acceptedRequests: Number(user.accepted_requests),
+        rejectedRequests: Number(user.rejected_requests),
+      },
+    };
+  });
+
   // Paginated request history, scoped to the authenticated account.
   app.get("/usage/history", async (request, reply) => {
     const accountId = await authenticate(request.headers["x-api-key"]);
@@ -186,7 +288,7 @@ export async function usageReportRoutes(app: FastifyInstance) {
       return reply.code(400).send(validationError(parsed.error.issues));
     }
 
-    const { userId, page, limit, status } = parsed.data;
+    const { userId, month, page, limit, status } = parsed.data;
     const offset = (page - 1) * limit;
 
     const conditions = ["r.account_id = $1"];
@@ -200,6 +302,13 @@ export async function usageReportRoutes(app: FastifyInstance) {
     if (status) {
       values.push(status);
       conditions.push(`r.status = $${values.length}`);
+    }
+
+    if (month) {
+      values.push(`${month}-01`);
+      conditions.push(
+        `r.created_at >= ($${values.length}::date::timestamp AT TIME ZONE 'UTC') AND r.created_at < (($${values.length}::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'UTC')`,
+      );
     }
 
     const whereClause = conditions.join(" AND ");

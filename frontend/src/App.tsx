@@ -13,6 +13,7 @@ import {
   isUsageRejection,
   type CurrentUsage,
   type History,
+  type MonthlyUsage,
   type Plan,
   type User,
 } from "./api";
@@ -768,10 +769,12 @@ function HistoryTable({ rows }: { rows: History["data"] }) {
 
 function HistoryPage({ api }: { api: ApiClient }) {
   const [history, setHistory] = useState<History | null>(null);
+  const [monthlyUsage, setMonthlyUsage] = useState<MonthlyUsage | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState<"" | "accepted" | "rejected">("");
   const [userId, setUserId] = useState("");
+  const [month, setMonth] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -787,20 +790,28 @@ function HistoryPage({ api }: { api: ApiClient }) {
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
+    setMonthlyUsage(null);
     try {
-      const result = await api.getHistory({
-        page,
-        limit: 20,
-        status: status || undefined,
-        userId: userId || undefined,
-      });
+      const [result, report] = await Promise.all([
+        api.getHistory({
+          page,
+          limit: 20,
+          status: status || undefined,
+          userId: userId || undefined,
+          month: month || undefined,
+        }),
+        month
+          ? api.getMonthlyUsage(month, userId || undefined)
+          : Promise.resolve(null),
+      ]);
       setHistory(result);
+      setMonthlyUsage(report);
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
       setLoading(false);
     }
-  }, [api, page, status, userId]);
+  }, [api, month, page, status, userId]);
 
   useEffect(() => { void loadUsers(); }, [loadUsers]);
   useEffect(() => { void load(); }, [load]);
@@ -808,6 +819,18 @@ function HistoryPage({ api }: { api: ApiClient }) {
   return (
     <>
       <div className="page-heading"><div><span className="eyebrow">AUDIT TRAIL</span><h1>Usage history</h1><p>Review every accepted and rejected request for this account.</p></div></div>
+      <section className="panel monthly-summary-panel">
+        <div className="panel-heading monthly-summary-heading">
+          <div><h2>Monthly usage summary</h2><p>Select a month to see historical account totals and request outcomes.</p></div>
+          <label htmlFor="history-month">Month<input id="history-month" type="month" value={month} onChange={(event) => { setPage(1); setMonth(event.target.value); }} /></label>
+        </div>
+        {month && loading && <Loading />}
+        {month && monthlyUsage && <div className="monthly-report" aria-live="polite">
+          <div><span>{month} · ACCOUNT USAGE</span><strong>{formattedUnits(monthlyUsage.account.consumed)} units</strong><small>{formattedUnits(monthlyUsage.account.acceptedRequests)} accepted · {formattedUnits(monthlyUsage.account.rejectedRequests)} rejected requests</small></div>
+          {monthlyUsage.user && <div><span>{monthlyUsage.user.name.toUpperCase()} · USER USAGE</span><strong>{formattedUnits(monthlyUsage.user.consumed)} units</strong><small>{formattedUnits(monthlyUsage.user.acceptedRequests)} accepted · {formattedUnits(monthlyUsage.user.rejectedRequests)} rejected requests</small></div>}
+        </div>}
+        {!month && <p className="monthly-summary-hint">Choose a month above to display its usage summary.</p>}
+      </section>
       <section className="panel history-panel">
         <div className="panel-heading history-heading">
           <div><h2>All requests</h2><p>{history ? `${formattedUnits(history.pagination.total)} total requests` : "Request records for your account"}</p></div>

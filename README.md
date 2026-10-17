@@ -192,6 +192,19 @@ Content-Type: application/json
 
 A successful request returns `201 Created` and includes the newly issued API key. Store it securely because it is only returned when the account is created.
 
+**Example response (`201 Created`)**
+
+```json
+{
+  "id": "ACCOUNT_UUID",
+  "name": "Example Account",
+  "plan": "Starter",
+  "apiKey": "ums_<issued-secret>",
+  "createdAt": "2026-10-17T12:00:00.000Z",
+  "warning": "Save this API key securely. It will not be shown again."
+}
+```
+
 ### Create a User
 
 **Request**
@@ -208,6 +221,93 @@ x-api-key: YOUR_API_KEY
   "plan": "Basic"
 }
 ```
+
+**Example response (`201 Created`)**
+
+```json
+{
+  "id": "USER_UUID",
+  "accountId": "ACCOUNT_UUID",
+  "name": "Example User",
+  "plan": "Basic",
+  "createdAt": "2026-10-17T12:01:00.000Z"
+}
+```
+
+`GET /users` returns only users in the authenticated account, with current-month usage:
+
+```json
+{
+  "users": [
+    {
+      "id": "USER_UUID",
+      "accountId": "ACCOUNT_UUID",
+      "name": "Example User",
+      "plan": "Basic",
+      "createdAt": "2026-10-17T12:01:00.000Z",
+      "usage": {
+        "monthStart": "2026-10-01",
+        "consumed": "5",
+        "limit": "1000",
+        "remaining": "995"
+      }
+    }
+  ]
+}
+```
+
+### Manage Plans
+
+`GET /plans` returns built-in plans and custom plans owned by the authenticated account. Numeric database limits are serialized as strings:
+
+```json
+{
+  "plans": [
+    {
+      "id": "PLAN_UUID",
+      "scope": "account",
+      "name": "Starter",
+      "monthly_limit": "10000",
+      "max_units_per_request": "100",
+      "is_builtin": true,
+      "created_at": "2026-10-17T12:00:00.000Z",
+      "updated_at": "2026-10-17T12:00:00.000Z"
+    }
+  ]
+}
+```
+
+Create a custom plan with `POST /plans` (send the same API-key header shown above):
+
+```json
+{
+  "scope": "user",
+  "name": "Team User Plan",
+  "monthlyLimit": 5000,
+  "maxUnitsPerRequest": 50
+}
+```
+
+The response is `201 Created` with a `plan` object using the database field names:
+
+```json
+{
+  "plan": {
+    "id": "PLAN_UUID",
+    "scope": "user",
+    "name": "Team User Plan",
+    "monthly_limit": "5000",
+    "max_units_per_request": "50",
+    "is_builtin": false,
+    "created_at": "2026-10-17T12:02:00.000Z",
+    "updated_at": "2026-10-17T12:02:00.000Z"
+  }
+}
+```
+
+`GET /plans/PLAN_UUID` and `PATCH /plans/PLAN_UUID` return `{ "plan": ... }` in that same shape. PATCH accepts any non-empty subset of `name`, `monthlyLimit`, and `maxUnitsPerRequest`. Built-in plans cannot be edited (`403 BUILTIN_PLAN_READ_ONLY`); custom plans owned by another account are not accessible.
+
+Assign a plan with `PUT /plans/assign/account` or `PUT /plans/assign/user`, sending `planId` and, for a user, `userId`. Account assignment returns `{ "message": "Account plan updated.", "plan": { "id": "PLAN_UUID", "name": "Team Account Plan", "monthly_limit": "50000", "max_units_per_request": "500" } }`. User assignment returns `{ "message": "User plan updated.", "user": { "id": "USER_UUID", "name": "Example User" }, "plan": { "id": "PLAN_UUID", "name": "Team User Plan", "monthly_limit": "5000", "max_units_per_request": "50" } }`. Both operations enforce scope and account ownership.
 
 ### Consume Usage
 
@@ -271,6 +371,7 @@ A reused request ID with a different user or unit count returns `409 Conflict`:
 ```
 
 Invalid request bodies or query parameters return `400 Bad Request` with `error: "VALIDATION_ERROR"` and a `details` array. Missing or invalid API keys return `401 Unauthorized` with `error: "UNAUTHORIZED"`.
+Requests above a plan's per-request maximum return `422 Unprocessable Entity`. For example, a user-level maximum rejection is `{ "allowed": false, "requestId": "unique-request-002", "units": 25, "scope": "user", "reason": "MAX_UNITS_PER_REQUEST" }`.
 
 ### Get Current Usage
 
@@ -282,6 +383,31 @@ x-api-key: YOUR_API_KEY
 ```
 
 The report includes consumed units, configured limits, remaining quota, and maximum units per request for the account and user.
+
+**Example response**
+
+```json
+{
+  "account": {
+    "plan": "Starter",
+    "monthStart": "2026-10-01",
+    "consumed": "5",
+    "limit": "10000",
+    "remaining": "9995",
+    "maxUnitsPerRequest": "100"
+  },
+  "user": {
+    "id": "USER_UUID",
+    "name": "Example User",
+    "plan": "Basic",
+    "monthStart": "2026-10-01",
+    "consumed": "5",
+    "limit": "1000",
+    "remaining": "995",
+    "maxUnitsPerRequest": "20"
+  }
+}
+```
 
 ### Get Historical Monthly Usage
 
@@ -354,13 +480,22 @@ The dashboard's History section supports month, status, and user filters and sho
 
 ## Assumptions and Limitations
 
-- Quota periods are UTC calendar months, and usage is measured in integer units supplied by the caller.
-- The API key identifies and scopes an account; there are no separate end-user credentials or role-based permissions.
-- Request IDs are unique within an account. Identical retries replay the original outcome, while a changed payload using the same ID is a conflict.
-- Account and user monthly limits are enforced independently. Changing a plan affects future consumption checks and does not reset or remove already-recorded usage.
-- Built-in plans are shared defaults; custom plans belong to the creating account and can only be assigned within that account.
-- Historical request and consumption records are retained, but plan assignments are not versioned. Therefore past quota limits and remaining balances cannot be reconstructed after plan changes.
-- This project demonstrates metering and quota enforcement; it does not provide billing, refunds, chargebacks, end-user authentication, or distributed multi-region quota coordination.
+The brief leaves some product and implementation details open. The following choices keep the service predictable and focused on the single-resource metering use case:
+
+| Decision | Assumption and rationale |
+|---|---|
+| Usage period | A quota month is a UTC calendar month. Using one explicit timezone gives clients and the service an unambiguous reset boundary. |
+| Usage units | Each request charges a positive whole number of units for one resource. Integer accounting avoids fractional rounding ambiguity; multiple resource types are outside this project's scope. |
+| Combined limits | A request must satisfy both the account's shared limit and the individual user's limit. They represent the same action, so an accepted request adds its units once to each counter; a rejection adds to neither. |
+| Request identity | A request ID is unique within an account. Replaying an identical payload returns its recorded decision; reusing the ID for different data is a conflict. This makes client retries safe without double charging. |
+| Plan changes | Plan changes govern subsequent requests and never erase accumulated usage. This preserves the usage ledger and means reducing a limit below current consumption blocks further usage until the limit or month changes. |
+| Plan ownership | Built-in plans are shared defaults and read-only; custom plans belong to their creating account. This avoids one account changing another account's rules or changing defaults for everyone. |
+| Authentication | The API key identifies the calling account; authorization is account-scoped rather than based on separate end-user identities or roles, as required for a service called by another application's backend. |
+| Persistence and reporting | Aggregated monthly counters support quota checks and current totals, while individual request records support idempotency, audit history, and accepted/rejected counts. Plan assignment history is not versioned, so historical limits cannot be reconstructed after a plan change. |
+| Concurrent requests | Correct quota decisions take priority over maximum throughput. Requests for an account are serialized by a PostgreSQL account-row lock within a transaction; this is straightforward for the single-database scope, but can become a contention point for a heavily loaded account. |
+| Deployment scope | One API service and one PostgreSQL database are sufficient for this demonstration. Distributed multi-region coordination would need a separate design and is not claimed here. |
+
+Billing, refunds, chargebacks, end-user authentication, role-based permission management, multiple resource types, and distributed multi-region quota coordination are intentionally not implemented.
 
 ## Built-in Plans
 

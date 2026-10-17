@@ -177,6 +177,125 @@ describe("API endpoints", () => {
     createdUserIds.push(user.id);
   });
 
+  it("GET /users rejects missing and invalid API keys", async () => {
+    const missingKeyResponse = await app.inject({
+      method: "GET",
+      url: "/users",
+    });
+
+    expect(missingKeyResponse.statusCode).toBe(401);
+    expect(missingKeyResponse.json().error).toBe("UNAUTHORIZED");
+
+    const invalidKeyResponse = await app.inject({
+      method: "GET",
+      url: "/users",
+      headers: {
+        "x-api-key": "invalid_test_key",
+      },
+    });
+
+    expect(invalidKeyResponse.statusCode).toBe(401);
+    expect(invalidKeyResponse.json().error).toBe("UNAUTHORIZED");
+  });
+
+  it("GET /users lists only users belonging to the authenticated account", async () => {
+    const accountAResponse = await app.inject({
+      method: "POST",
+      url: "/accounts",
+      payload: {
+        name: `Vitest Users A ${Date.now()}`,
+        plan: "Starter",
+      },
+    });
+
+    expect(accountAResponse.statusCode).toBe(201);
+    const accountA = accountAResponse.json();
+    createdAccountIds.push(accountA.id);
+
+    const userAResponse = await app.inject({
+      method: "POST",
+      url: "/users",
+      headers: { "x-api-key": accountA.apiKey },
+      payload: { name: "Account A User", plan: "Basic" },
+    });
+
+    expect(userAResponse.statusCode).toBe(201);
+    const userA = userAResponse.json();
+    createdUserIds.push(userA.id);
+
+    const accountBResponse = await app.inject({
+      method: "POST",
+      url: "/accounts",
+      payload: {
+        name: `Vitest Users B ${Date.now()}`,
+        plan: "Starter",
+      },
+    });
+
+    expect(accountBResponse.statusCode).toBe(201);
+    const accountB = accountBResponse.json();
+    createdAccountIds.push(accountB.id);
+
+    const userBResponse = await app.inject({
+      method: "POST",
+      url: "/users",
+      headers: { "x-api-key": accountB.apiKey },
+      payload: { name: "Account B User", plan: "Premium" },
+    });
+
+    expect(userBResponse.statusCode).toBe(201);
+    const userB = userBResponse.json();
+    createdUserIds.push(userB.id);
+
+    const usageResponse = await app.inject({
+      method: "POST",
+      url: "/usage/consume",
+      headers: { "x-api-key": accountA.apiKey },
+      payload: {
+        userId: userA.id,
+        requestId: `vitest-users-list-${Date.now()}`,
+        units: 3,
+      },
+    });
+
+    expect(usageResponse.statusCode).toBe(200);
+
+    const listAResponse = await app.inject({
+      method: "GET",
+      url: "/users",
+      headers: { "x-api-key": accountA.apiKey },
+    });
+
+    expect(listAResponse.statusCode).toBe(200);
+    expect(listAResponse.json().users).toEqual([
+      expect.objectContaining({
+        id: userA.id,
+        accountId: accountA.id,
+        name: "Account A User",
+        plan: "Basic",
+        usage: {
+          monthStart: expect.any(String),
+          consumed: "3",
+          limit: "1000",
+          remaining: "997",
+        },
+      }),
+    ]);
+    expect(listAResponse.json().users).not.toContainEqual(
+      expect.objectContaining({ id: userB.id }),
+    );
+
+    const listBResponse = await app.inject({
+      method: "GET",
+      url: "/users",
+      headers: { "x-api-key": accountB.apiKey },
+    });
+
+    expect(listBResponse.statusCode).toBe(200);
+    expect(listBResponse.json().users.map((user: { id: string }) => user.id))
+      .toEqual([userB.id]);
+  });
+
   it("POST /usage/consume rejects a missing API key", async () => {
     const response = await app.inject({
       method: "POST",
@@ -546,6 +665,9 @@ describe("API endpoints", () => {
 
     expect(firstResponse.statusCode).toBe(200);
     expect(firstResponse.json().allowed).toBe(true);
+    expect(firstResponse.json().accountUsage.consumed).toBe(5);
+    expect(firstResponse.json().userUsage.consumed).toBe(5);
+    expect(firstResponse.json().userUsage.limit).toBe(1000);
 
     const secondResponse = await app.inject({
       method: "POST",
@@ -562,6 +684,8 @@ describe("API endpoints", () => {
 
     expect(secondResponse.statusCode).toBe(429);
     expect(secondResponse.json().allowed).toBe(false);
+    expect(secondResponse.json().reason).toBe("MONTHLY_LIMIT_EXCEEDED");
+    expect(secondResponse.json().scope).toBe("account");
 
     const currentResponse = await app.inject({
       method: "GET",
@@ -573,6 +697,9 @@ describe("API endpoints", () => {
 
     expect(currentResponse.statusCode).toBe(200);
     expect(currentResponse.json().account.consumed).toBe("5");
+    expect(currentResponse.json().account.remaining).toBe("0");
+    expect(currentResponse.json().user.consumed).toBe("5");
+    expect(currentResponse.json().user.remaining).toBe("995");
   });
 
   it("GET /usage/current prevents cross-account user access", async () => {
@@ -814,6 +941,115 @@ describe("API endpoints", () => {
     expect(usageResponse.statusCode).toBe(200);
     expect(usageResponse.json().account.consumed).toBe("10");
     expect(usageResponse.json().user.consumed).toBe("10");
+  });
+
+  it("POST /usage/consume enforces a user's monthly limit under concurrent requests", async () => {
+    const accountResponse = await app.inject({
+      method: "POST",
+      url: "/accounts",
+      payload: {
+        name: `Vitest User Concurrency ${Date.now()}`,
+        plan: "Starter",
+      },
+    });
+
+    expect(accountResponse.statusCode).toBe(201);
+
+    const account = accountResponse.json();
+    createdAccountIds.push(account.id);
+
+    const userResponse = await app.inject({
+      method: "POST",
+      url: "/users",
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+      payload: {
+        name: "User Concurrency Test",
+        plan: "Basic",
+      },
+    });
+
+    expect(userResponse.statusCode).toBe(201);
+
+    const user = userResponse.json();
+    createdUserIds.push(user.id);
+
+    const planResponse = await app.inject({
+      method: "POST",
+      url: "/plans",
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+      payload: {
+        scope: "user",
+        name: `Concurrent User Limit ${Date.now()}`,
+        monthlyLimit: 10,
+        maxUnitsPerRequest: 2,
+      },
+    });
+
+    expect(planResponse.statusCode).toBe(201);
+
+    const assignResponse = await app.inject({
+      method: "PUT",
+      url: "/plans/assign/user",
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+      payload: {
+        userId: user.id,
+        planId: planResponse.json().plan.id,
+      },
+    });
+
+    expect(assignResponse.statusCode).toBe(200);
+
+    const responses = await Promise.all(
+      Array.from({ length: 10 }, (_, index) =>
+        app.inject({
+          method: "POST",
+          url: "/usage/consume",
+          headers: {
+            "x-api-key": account.apiKey,
+          },
+          payload: {
+            userId: user.id,
+            requestId: `user-concurrency-${Date.now()}-${index}`,
+            units: 2,
+          },
+        }),
+      ),
+    );
+
+    const accepted = responses.filter(
+      (response) => response.statusCode === 200,
+    );
+    const rejected = responses.filter(
+      (response) => response.statusCode === 429,
+    );
+
+    expect(accepted).toHaveLength(5);
+    expect(rejected).toHaveLength(5);
+
+    for (const response of rejected) {
+      expect(response.json().allowed).toBe(false);
+      expect(response.json().reason).toBe("MONTHLY_LIMIT_EXCEEDED");
+      expect(response.json().scope).toBe("user");
+    }
+
+    const usageResponse = await app.inject({
+      method: "GET",
+      url: `/usage/current?userId=${user.id}`,
+      headers: {
+        "x-api-key": account.apiKey,
+      },
+    });
+
+    expect(usageResponse.statusCode).toBe(200);
+    expect(usageResponse.json().account.consumed).toBe("10");
+    expect(usageResponse.json().user.consumed).toBe("10");
+    expect(usageResponse.json().user.remaining).toBe("0");
   });
 
   it("POST /usage/consume applies updated account plan limits to future requests", async () => {

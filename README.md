@@ -12,6 +12,8 @@ A TypeScript REST API for tracking API usage, enforcing account-level and user-l
 - Idempotent usage requests to prevent duplicate consumption.
 - Monthly usage tracking and quota reporting.
 - Paginated usage history with optional filters.
+- Responsive React dashboard for managing account usage, users, plans, and request history.
+- In-memory API-key connection with account creation and a one-time key reveal.
 - PostgreSQL persistence and database migrations.
 - Automated API tests with Vitest.
 - Docker Compose setup for running the service and PostgreSQL.
@@ -26,11 +28,13 @@ A TypeScript REST API for tracking API usage, enforcing account-level and user-l
 - **Database Driver:** node-postgres (`pg`)
 - **Testing:** Vitest
 - **Containers:** Docker and Docker Compose
+- **Frontend:** React, TypeScript, Vite, and lightweight CSS
 
 ## Architecture
 
-The service consists of three main components:
+The application consists of four main components:
 
+- **Dashboard:** A responsive React application served by Nginx, with API traffic proxied to the backend.
 - **API:** Handles authentication, plan management, usage consumption, and reports.
 - **PostgreSQL:** Stores accounts, plans, users, usage periods, and usage requests.
 - **Migration runner:** Initializes a new database schema or records an already-existing compatible schema without replacing application data.
@@ -39,8 +43,8 @@ The service consists of three main components:
 
 ### Prerequisites
 
-- Docker Desktop
-- Docker Compose
+- Node.js 22 or newer and npm
+- PostgreSQL 17 (or Docker Desktop with Docker Compose)
 
 ### Run with Docker Compose
 
@@ -55,6 +59,14 @@ Start the services:
 
 ```bash
 docker compose up -d --build
+```
+
+Open the dashboard at **http://localhost:4173**. The dashboard sends API requests through its same-origin `/api` proxy to the Compose backend; the browser does not use the container-only `app` hostname and no permissive CORS configuration is needed. The API remains available directly at **http://localhost:3000**.
+
+The `example-client` container also runs the existing API demonstration and exits when finished. It creates demo accounts and usage records in the configured database. To start the dashboard and API without rerunning the demo client:
+
+```bash
+docker compose up -d --build app frontend
 ```
 
 Check their status:
@@ -84,7 +96,9 @@ Check database connectivity:
 curl http://localhost:3000/health/db
 ```
 
-The example client runs automatically after the API becomes healthy. It demonstrates account creation, user creation, usage consumption, quota enforcement, plan limit updates, and current usage reporting. Its container exits after completing the example.
+The example client demonstrates account creation, user creation, usage consumption, quota enforcement, plan limit updates, and current usage reporting. Its container exits after completing the example.
+
+The frontend listens on port `4173`. To change the API base path used by its built bundle, set `VITE_API_BASE_URL` before building; keep the default `/api` when using the Compose Nginx proxy.
 
 View service logs:
 
@@ -102,18 +116,23 @@ docker compose down
 This stops and removes the Compose containers and network while preserving the named PostgreSQL volume.
 
 **Do not use `docker compose down -v` if you need to preserve the database volume.**
+`POSTGRES_PASSWORD` is configurable through the root `.env`; its default matches the existing local development credential. Changing this variable does not rotate the password stored in an already-initialized PostgreSQL volume. Keep it consistent with that volume's existing credential; this setup does not recreate the volume or rotate credentials.
 
 ## Configuration
 
-The local application uses environment variables loaded from `.env`.
+The backend reads its environment variables from the repository-root `.env`.
 
 | Variable | Description |
 |---|---|
 | `DATABASE_URL` | PostgreSQL connection string |
 | `PORT` | HTTP server port |
 | `NODE_ENV` | Application environment |
+| `POSTGRES_PASSWORD` | Local Compose PostgreSQL password (default: `local_dev_password`); keep in sync with the existing database volume |
+| `VITE_API_BASE_URL` | Frontend API base path; defaults to `/api` for the proxy |
+| `VITE_PROXY_TARGET` | Backend URL used by the local Vite development proxy (default: `http://localhost:3000`) |
 
 Use `.env.example` as a reference for local configuration. Never commit `.env` files, real API keys, or production credentials.
+The frontend reads its own variables from `frontend/.env`; use `frontend/.env.example` as the local reference. `VITE_API_BASE_URL` is compiled into the frontend bundle, and `VITE_PROXY_TARGET` is used only by the Vite development server. Compose defaults to the same-origin `/api` proxy.
 
 Docker Compose supplies the database connection settings to its containers through their environment.
 
@@ -126,6 +145,7 @@ The API listens on port `3000` by default.
 | GET | `/health` | Check API health |
 | GET | `/health/db` | Check database connectivity |
 | POST | `/accounts` | Create an account and issue an API key |
+| GET | `/users` | List users and current-month usage in the authenticated account |
 | POST | `/users` | Create a user within the authenticated account |
 | GET | `/plans` | List available plans |
 | POST | `/plans` | Create a custom plan |
@@ -144,6 +164,14 @@ x-api-key: YOUR_API_KEY
 ```
 
 Account-scoped resources are isolated by the authenticated account.
+
+### Connect to the Dashboard
+
+On **http://localhost:4173**, enter an existing account API key to connect. The dashboard validates it against the plans endpoint before opening the workspace. Keys remain in React memory only and are cleared when you disconnect or close/reload the page.
+
+If you do not have an account, use **Create an account** on the connection screen. Choose Starter or Pro, then copy the returned API key and save it securely before continuing: the backend returns it only once. The dashboard never stores the key in local storage or sends it to any service other than the configured API.
+
+The dashboard includes account usage and quota cards; account-scoped user creation and plan assignment; built-in and custom plan management; usage submission with unique idempotency IDs and safe same-ID retries; and filtered, paginated usage history.
 
 ### Create an Account
 
@@ -241,19 +269,47 @@ Monthly usage periods use UTC calendar months. Requests exceeding the per-reques
 
 The service also supports custom plans and plan assignments through the API.
 
+### Concurrent Quota Enforcement
+
+Concurrent usage requests are checked against both the shared account monthly quota and the individual user's monthly quota. Automated tests submit requests concurrently at each scope and verify that accepted usage stays within the applicable monthly limit; requests beyond the remaining quota are rejected without increasing consumed usage.
+
 ## Local Development
 
-Install dependencies:
+Install backend dependencies:
 
 ```bash
 npm ci
 ```
 
-Configure `.env` with a valid PostgreSQL connection string, then run the API:
+Start PostgreSQL with Compose (or use an existing PostgreSQL instance):
+
+```powershell
+docker compose up -d db
+```
+
+Create the backend environment file once, then configure `DATABASE_URL` and `POSTGRES_PASSWORD` as needed. The example password is for local development only; the Compose database and local application connection must use matching credentials:
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+```
+
+Initialize or verify the schema and start the API:
 
 ```bash
+node scripts/migrate.mjs
 npm run dev
 ```
+
+In a second terminal, install and start the frontend:
+
+```powershell
+Set-Location frontend
+Copy-Item .env.example .env
+npm ci
+npm run dev
+```
+
+Open **http://localhost:5173**. Vite proxies `/api` to `VITE_PROXY_TARGET` (default `http://localhost:3000`); set that variable in `frontend/.env` if your local backend listens elsewhere. No API key is written to disk.
 
 Build the project:
 
@@ -267,11 +323,18 @@ Run automated tests:
 npm test
 ```
 
+Build the frontend:
+
+```powershell
+Set-Location frontend
+npm run build
+```
+
 The test suite uses a dedicated test database. Configure its connection according to `tests/setup.ts` and ensure PostgreSQL is running before executing database integration tests.
 
 ## Docker Demo
 
-To inspect the example client's output:
+To inspect the example client's output when it is run by the full Compose startup:
 
 ```bash
 docker compose logs example-client
@@ -280,6 +343,8 @@ docker compose logs example-client
 The demo illustrates account and user creation, usage consumption, per-request limit enforcement, account quota enforcement, updating a plan limit, and retrieving current usage.
 
 The example client container exits after the demo completes. This is expected behavior.
+
+To rebuild and start the dashboard and API without rerunning the example client, use `docker compose up -d --build app frontend`. The frontend is available at **http://localhost:4173**. `docker compose down` preserves the named PostgreSQL volume; do not use `docker compose down -v` if the database must be retained.
 
 ## Security Notes
 
@@ -294,6 +359,8 @@ The credentials in `.env.example` are intended for local development only and mu
 ## Performance Testing
 
 A basic local load test is available at `scripts/load-test.mjs`.
+
+**Database side effects:** This script creates an account, a user, and usage request records, and does not clean them up afterward. Run it against a suitable test or demo database, not a database containing important data. The script does not automatically delete any generated records.
 
 Run it while the API is running:
 

@@ -9,6 +9,70 @@ const createUserSchema = z.object({
 });
 
 export async function userRoutes(app: FastifyInstance) {
+  app.get("/users", async (request, reply) => {
+    const apiKey = request.headers["x-api-key"];
+
+    if (typeof apiKey !== "string" || apiKey.length === 0) {
+      return reply.code(401).send({
+        error: "UNAUTHORIZED",
+        message: "Missing API key.",
+      });
+    }
+
+    const apiKeyHash = createHash("sha256").update(apiKey).digest("hex");
+    const accountResult = await pool.query(
+      "SELECT id FROM accounts WHERE api_key_hash = $1",
+      [apiKeyHash],
+    );
+
+    if (accountResult.rowCount !== 1) {
+      return reply.code(401).send({
+        error: "UNAUTHORIZED",
+        message: "Invalid API key.",
+      });
+    }
+
+    const accountId = accountResult.rows[0].id;
+    const now = new Date();
+    const monthStart = `${now.getUTCFullYear()}-${String(
+      now.getUTCMonth() + 1,
+    ).padStart(2, "0")}-01`;
+    const result = await pool.query(
+      `SELECT u.id, u.name, p.name AS plan_name, p.monthly_limit,
+              u.created_at, COALESCE(up.consumed_units, 0)::text AS consumed
+       FROM users u
+       JOIN plans p ON p.id = u.plan_id AND p.scope = 'user'
+       LEFT JOIN usage_periods up
+         ON up.account_id = u.account_id
+        AND up.user_id = u.id
+        AND up.month_start = $2
+       WHERE u.account_id = $1
+       ORDER BY u.created_at DESC, u.id`,
+      [accountId, monthStart],
+    );
+
+    return {
+      users: result.rows.map((user) => {
+        const consumed = BigInt(user.consumed);
+        const limit = BigInt(user.monthly_limit);
+
+        return {
+          id: user.id,
+          accountId,
+          name: user.name,
+          plan: user.plan_name,
+          createdAt: user.created_at,
+          usage: {
+            monthStart,
+            consumed: consumed.toString(),
+            limit: limit.toString(),
+            remaining: (limit > consumed ? limit - consumed : 0n).toString(),
+          },
+        };
+      }),
+    };
+  });
+
   app.post("/users", async (request, reply) => {
     const apiKey = request.headers["x-api-key"];
 

@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: usage_metering_v2
       POSTGRES_USER: usage_app
-      POSTGRES_PASSWORD: local_dev_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_password}
     ports:
       - "5433:5432"
     volumes:
@@ -20,7 +20,7 @@ services:
     command: ["node", "scripts/migrate.mjs"]
     restart: "no"
     environment:
-      DATABASE_URL: postgresql://usage_app:local_dev_password@db:5432/usage_metering_v2
+      DATABASE_URL: postgresql://usage_app:${POSTGRES_PASSWORD:-local_dev_password}@db:5432/usage_metering_v2
       NODE_ENV: production
     depends_on:
       db:
@@ -29,7 +29,7 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://usage_app:local_dev_password@db:5432/usage_metering_v2
+      DATABASE_URL: postgresql://usage_app:${POSTGRES_PASSWORD:-local_dev_password}@db:5432/usage_metering_v2
       PORT: "3000"
       NODE_ENV: production
     ports:
@@ -47,6 +47,17 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+    restart: unless-stopped
+    ports:
+      - "4173:80"
+    depends_on:
+      app:
+        condition: service_healthy
   example-client:
     build: .
     command: ["node", "examples/client.mjs"]
